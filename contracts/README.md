@@ -43,10 +43,13 @@ Emitted when energy usage is recorded and cost deducted from balance.
 #### meter_deactivated
 - **Topic 0:** `mtr_deact` (symbol_short)
 - **Topic 1:** `solargrid` (EVT_NS)
-- **Topic 2:** `meter_id` (Symbol)
-- **Data:** `()` (empty)
+- **Topic 2:** `meter_id` (String)
+- **Data:** `MeterDeactivated` (`meter_id: String`, `reason: Symbol`, `timestamp: u64`)
 
-Emitted when a meter is deactivated (balance drained to zero or via `set_active(false)`).
+Emitted when a meter is deactivated in any of the following scenarios:
+- Balance depleted to zero (`balance_zero`) in `apply_usage()` or refund
+- Administrative deactivation (`admin_action`) via `set_active(false)`, `set_meter_active(false)`, `deactivate_meter()`, or `batch_deactivate_meters()`
+- Grace period expiry (`expiry`) in `apply_usage()`
 
 #### batch_skip
 - **Topic 0:** `btch_skip` (symbol_short)

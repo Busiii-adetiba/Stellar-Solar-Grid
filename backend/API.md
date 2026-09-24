@@ -745,3 +745,82 @@ is optional (omit for all meters); `limit` caps the number of rows (default
 Hard-deletes submitted events older than N days **without** aggregating them
 first — use `POST /api/usage-events/compact` instead unless you specifically
 want to discard the history rather than roll it up. Requires `X-Admin-Key`.
+
+## GraphQL API
+
+Endpoint: `/graphql` (also accessible at `/api/graphql`)
+
+Provides unified querying for meters, payments, and usage events in a single round-trip.
+
+### Development Playground
+
+In development mode (`NODE_ENV !== "production"`), navigating to `GET /graphql` opens an interactive GraphQL Playground in the browser.
+
+### Schema Queries
+
+#### `meter(id: String!): Meter`
+Query meter details, current balance, associated payments, and paginated usage history.
+
+```graphql
+query GetMeter($id: String!) {
+  meter(id: $id) {
+    id
+    owner
+    active
+    unitsUsed
+    plan
+    lastPayment
+    expiresAt
+    dailyLimit
+    daySpent
+    balance
+    payments {
+      txHash
+      amountXlm
+      status
+      confirmedAt
+    }
+    usageHistory(page: 1, pageSize: 10) {
+      total
+      events {
+        id
+        units
+        cost
+        receivedAt
+      }
+    }
+  }
+}
+```
+
+#### `metersByOwner(address: String!): [Meter!]!`
+Fetch all meters registered to a Stellar wallet address.
+
+```graphql
+query GetMetersByOwner($address: String!) {
+  metersByOwner(address: $address) {
+    id
+    owner
+    active
+    plan
+    balance
+  }
+}
+```
+
+#### `payments(meterId: String!): [Payment!]!`
+Fetch on-chain payments recorded for a specific meter ID.
+
+```graphql
+query GetPayments($meterId: String!) {
+  payments(meterId: $meterId) {
+    txHash
+    address
+    amountXlm
+    plan
+    status
+    confirmedAt
+  }
+}
+```
+

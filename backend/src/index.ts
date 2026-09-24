@@ -1,4 +1,4 @@
-﻿import "dotenv/config";
+import "dotenv/config";
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "module";
@@ -304,6 +304,7 @@ app.use("/api/usage-events", usageEventsRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/meters", insightsRouter);
 app.use("/api/graphql", graphqlRouter);
+app.use("/graphql", graphqlRouter);
 app.use("/api/provider", providerRouter);
 
 // â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

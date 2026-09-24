@@ -1397,8 +1397,14 @@ impl SolarGridContract {
         if new_balance == 0 && meter.active {
             meter.active = false;
             env.storage().persistent().set(&key, &meter);
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason: Symbol::new(&env, "balance_zero"),
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
         }
 
         // Reverse the admin's tracked revenue for the refunded amount, so the
@@ -2012,11 +2018,7 @@ impl SolarGridContract {
             (EVT_NS, symbol_short!("usg_upd"), meter_id.clone()),
             (units, cost),
         );
-        // meter_deactivated — only when balance drained to zero
-        if deactivated {
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id), ());
-        }
+        // meter_deactivated event is emitted directly inside apply_usage if deactivated
         Ok(())
     }
 
@@ -2103,10 +2105,22 @@ impl SolarGridContract {
             env.events()
                 .publish((EVT_NS, symbol_short!("mtr_actv"), meter_id.clone()), ());
         } else {
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+            let now = env.ledger().timestamp();
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason: Symbol::new(&env, "admin_action"),
+                    timestamp: now,
+                },
+            );
         }
         Ok(())
+    }
+
+    /// Admin can manually toggle meter access (alias for set_active, #811).
+    pub fn set_meter_active(env: Env, meter_id: String, active: bool) -> Result<(), ContractError> {
+        Self::set_active(env, meter_id, active)
     }
 
     /// Admin-only: immediately deactivate a meter (e.g. for non-paying
@@ -2114,7 +2128,7 @@ impl SolarGridContract {
     /// deactivation that doesn't require passing a boolean flag.
     ///
     /// Emits:
-    /// - `meter_deactivated { meter_id }`
+    /// - `meter_deactivated { meter_id, reason, timestamp }`
     pub fn deactivate_meter(env: Env, meter_id: String) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let key = DataKey::Meter(meter_id.clone());
@@ -2122,8 +2136,15 @@ impl SolarGridContract {
         meter.active = false;
         env.storage().persistent().set(&key, &meter);
 
-        env.events()
-            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id), ());
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+            MeterDeactivated {
+                meter_id,
+                reason: Symbol::new(&env, "admin_action"),
+                timestamp: now,
+            },
+        );
         Ok(())
     }
 
@@ -2161,6 +2182,7 @@ impl SolarGridContract {
         let mut results: Vec<BatchDeactivateResult> = vec![&env];
         let mut deactivated: u32 = 0;
         let mut skipped: u32 = 0;
+        let now = env.ledger().timestamp();
 
         for meter_id in meter_ids.iter() {
             let key = DataKey::Meter(meter_id.clone());
@@ -2199,8 +2221,14 @@ impl SolarGridContract {
                             reason: String::from_str(&env, "ok"),
                         });
 
-                        env.events()
-                            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+                        env.events().publish(
+                            (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                            MeterDeactivated {
+                                meter_id: meter_id.clone(),
+                                reason: Symbol::new(&env, "admin_action"),
+                                timestamp: now,
+                            },
+                        );
                     }
                 }
             }
@@ -2212,6 +2240,14 @@ impl SolarGridContract {
             skipped,
             results,
         })
+    }
+
+    /// Admin-only: alias for batch_deactivate_meters (#811).
+    pub fn batch_deactivate(
+        env: Env,
+        meter_ids: Vec<String>,
+    ) -> Result<BatchDeactivateSummary, ContractError> {
+        Self::batch_deactivate_meters(env, meter_ids)
     }
 
     // ── Collaborator management ───────────────────────────────────────────────
@@ -2585,10 +2621,7 @@ impl SolarGridContract {
                         (EVT_NS, symbol_short!("usg_upd"), meter_id.clone()),
                         (units, cost),
                     );
-                    if deactivated {
-                        env.events()
-                            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
-                    }
+                    // meter_deactivated event is emitted directly inside apply_usage if deactivated
                 }
                 Err(_) => {
                     failed.push_back(meter_id.clone());
@@ -2645,50 +2678,54 @@ impl SolarGridContract {
         // Issue #695: Retrieve balance from storage with overflow protection
         let bal_key = DataKey::MeterBalance(meter_id.clone());
         let balance: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
-        // Use saturating_sub to prevent underflow; clamp to 0 to ensure non-negative balance
-        let bal_key = DataKey::MeterBalance(meter_id.clone());
-        let balance: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
         let new_balance = balance.saturating_sub(cost).max(0);
         env.storage().persistent().set(&bal_key, &new_balance);
         meter.units_used = meter.units_used.saturating_add(units);
 
         let deactivated;
+        let mut deactivation_reason: Option<Symbol> = None;
         if new_balance == 0 {
             let grace_period = Self::get_grace_period(env.clone());
             if grace_period == 0 {
                 meter.active = false;
                 meter.grace_expires_at = None;
                 deactivated = true;
+                deactivation_reason = Some(Symbol::new(env, "balance_zero"));
             } else {
-                if meter.grace_expires_at.is_none() {
-                    // Closes #745: use checked_add for grace period timestamp to
-                    // prevent overflow if grace_period is set to an extreme value.
-                    let grace_exp = now
-                        .checked_add(grace_period)
-                        .unwrap_or(u64::MAX);
-                    // Start grace period without compounding
-                    meter.grace_expires_at = Some(grace_exp);
-                    deactivated = false;
-                } else if let Some(grace_exp) = meter.grace_expires_at {
-                    if now >= grace_exp {
-                        meter.active = false;
-                        deactivated = true;
-                    } else {
+                match meter.grace_expires_at {
+                    None => {
+                        // Closes #745: use checked_add for grace period timestamp to
+                        // prevent overflow if grace_period is set to an extreme value.
+                        let grace_exp = now.checked_add(grace_period).unwrap_or(u64::MAX);
+                        meter.grace_expires_at = Some(grace_exp);
                         deactivated = false;
                     }
-                } else {
-                    meter.active = false;
-                    deactivated = true;
-                } else {
-                    deactivated = false;
+                    Some(grace_exp) => {
+                        if now >= grace_exp {
+                            meter.active = false;
+                            deactivated = true;
+                            deactivation_reason = Some(Symbol::new(env, "expiry"));
+                        } else {
+                            deactivated = false;
+                        }
+                    }
                 }
-            } else {
-                meter.active = false;
-                deactivated = true;
             }
         } else {
             meter.grace_expires_at = None;
             deactivated = false;
+        }
+
+        if deactivated {
+            let reason = deactivation_reason.unwrap_or_else(|| Symbol::new(env, "balance_zero"));
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason,
+                    timestamp: now,
+                },
+            );
         }
         Ok(deactivated)
     }
@@ -5454,6 +5491,7 @@ mod tests {
         // set_active(false) is the last invocation — events().all() returns only its events
         client.set_active(&meter_id, &false);
 
+        let now = env.ledger().timestamp();
         assert_eq!(
             env.events().all(),
             vec![
@@ -5461,7 +5499,12 @@ mod tests {
                 (
                     client.address.clone(),
                     (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()).into_val(&env),
-                    ().into_val(&env),
+                    MeterDeactivated {
+                        meter_id: meter_id.clone(),
+                        reason: Symbol::new(&env, "admin_action"),
+                        timestamp: now,
+                    }
+                    .into_val(&env),
                 ),
             ]
         );
@@ -5482,6 +5525,7 @@ mod tests {
         // deactivate_meter is the last invocation
         client.deactivate_meter(&meter_id);
 
+        let now = env.ledger().timestamp();
         assert_eq!(
             env.events().all(),
             vec![
@@ -5489,7 +5533,12 @@ mod tests {
                 (
                     client.address.clone(),
                     (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()).into_val(&env),
-                    ().into_val(&env),
+                    MeterDeactivated {
+                        meter_id: meter_id.clone(),
+                        reason: Symbol::new(&env, "admin_action"),
+                        timestamp: now,
+                    }
+                    .into_val(&env),
                 ),
             ]
         );
