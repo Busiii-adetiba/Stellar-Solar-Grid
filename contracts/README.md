@@ -43,10 +43,13 @@ Emitted when energy usage is recorded and cost deducted from balance.
 #### meter_deactivated
 - **Topic 0:** `mtr_deact` (symbol_short)
 - **Topic 1:** `solargrid` (EVT_NS)
-- **Topic 2:** `meter_id` (Symbol)
-- **Data:** `()` (empty)
+- **Topic 2:** `meter_id` (String)
+- **Data:** `MeterDeactivated` (`meter_id: String`, `reason: Symbol`, `timestamp: u64`)
 
-Emitted when a meter is deactivated (balance drained to zero or via `set_active(false)`).
+Emitted when a meter is deactivated in any of the following scenarios:
+- Balance depleted to zero (`balance_zero`) in `apply_usage()` or refund
+- Administrative deactivation (`admin_action`) via `set_active(false)`, `set_meter_active(false)`, `deactivate_meter()`, or `batch_deactivate_meters()`
+- Grace period expiry (`expiry`) in `apply_usage()`
 
 #### batch_skip
 - **Topic 0:** `btch_skip` (symbol_short)
@@ -134,6 +137,15 @@ All event emissions are covered by unit tests:
 - `test_batch_deactivate_empty` — empty vector returns zero counts
 - `test_batch_deactivate_too_large` — rejects batches over 50 entries
 - `test_batch_deactivate_emits_events` — verifies mtr_deact events
+
+### Bulk Meter Registration (Issue #818)
+The `batch_register_meters(meters: Vec<(String, Address)>)` function enables energy providers to register up to 50 meters in a single transaction:
+- **Max Batch Size:** 50 meters per call. Returns `ContractError::BatchTooLarge` if exceeded.
+- **Input Validation:** Pre-validates empty meter IDs, duplicate IDs in batch, existing meters, and owner allowlist membership.
+- **Event Emission:** Emits standard `meter_registered` (`mtr_reg`) event for each successfully registered meter and `batch_skip` (`btch_skip`) for failed/skipped entries.
+- **Detailed Error Reporting:** Returns `Vec<BatchRegisterResult>` with `meter_id`, `success: bool`, and `error: Option<String>` detailing reasons for any partial failures (`empty_meter_id`, `duplicate_in_batch`, `meter_already_exists`, `owner_not_allowlisted`).
+- **Tests:** `test_batch_register_meters_success`, `test_batch_register_meters_partial_failures`, `test_batch_register_meters_too_large`.
+
 
 ## Contract Upgrades & Storage Migration
 

@@ -366,6 +366,16 @@ pub struct BatchDeactivateSummary {
     pub results: Vec<BatchDeactivateResult>,
 }
 
+/// Per-meter result returned by `batch_register_meters`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BatchRegisterResult {
+    pub meter_id: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+
 // ── Event topics (contract namespace) ────────────────────────────────────────
 
 const EVT_NS: Symbol = symbol_short!("solargrid");
@@ -543,12 +553,16 @@ impl SolarGridContract {
 
     /// Register multiple new smart meters in a single transaction.
     ///
-    /// Accepts a vector of `(meter_id, owner)` tuples. Each entry is skipped
-    /// (rather than aborting the whole batch) if the meter_id already exists,
-    /// is duplicated within the batch, or the owner is not on the allowlist;
-    /// a `batch_skip` event is emitted for each skip and `meter_registered`
-    /// for each success. Returns one bool per input entry (true = registered)
-    /// in the same order as the input. Admin-only. Maximum batch size: 100.
+    /// Register multiple new smart meters in a single transaction (Issue #818).
+    ///
+    /// Accepts a vector of `(meter_id, owner)` tuples. Each entry is validated:
+    /// if the meter_id is empty, already exists, is duplicated within the batch,
+    /// or the owner is not on the allowlist, the entry is skipped with detailed
+    /// error information and a `batch_skip` event is emitted. Successfully registered
+    /// meters emit a `meter_registered` (`mtr_reg`) event.
+    ///
+    /// Returns a vector of [BatchRegisterResult] indicating per-meter success and
+    /// error reasons. Admin-only. Maximum batch size: 50.
     ///
     /// SECURITY: Holds the reentrancy lock for the entire batch so a malicious
     /// owner contract cannot re-enter between the allowlist check and the meter
@@ -556,9 +570,12 @@ impl SolarGridContract {
     pub fn batch_register_meters(
         env: Env,
         meters: Vec<(String, Address)>,
-    ) -> Result<Vec<bool>, ContractError> {
+    ) -> Result<Vec<BatchRegisterResult>, ContractError> {
+        if Self::pause_is_active(&env) {
+            return Err(ContractError::ContractPaused);
+        }
         Self::require_admin(&env)?;
-        if meters.len() > 100 {
+        if meters.len() > 50 {
             return Err(ContractError::BatchTooLarge);
         }
         // Acquire reentrancy lock before reading the allowlist snapshot so the
@@ -574,17 +591,49 @@ impl SolarGridContract {
             .unwrap_or_else(|| vec![&env]);
 
         let mut seen: Vec<String> = vec![&env];
-        let mut results: Vec<bool> = vec![&env];
+        let mut results: Vec<BatchRegisterResult> = vec![&env];
+        let mut registered_count: u32 = 0;
 
         for (meter_id, owner) in meters.iter() {
-            let key = DataKey::Meter(meter_id.clone());
-            if seen.contains(&meter_id)
-                || env.storage().persistent().has(&key)
-                || !allowlist.contains(&owner)
-            {
+            if meter_id.len() == 0 {
                 env.events()
                     .publish((symbol_short!("btch_skip"), EVT_NS, meter_id.clone()), ());
-                results.push_back(false);
+                results.push_back(BatchRegisterResult {
+                    meter_id: meter_id.clone(),
+                    success: false,
+                    error: Some(String::from_str(&env, "empty_meter_id")),
+                });
+                continue;
+            }
+            if seen.contains(&meter_id) {
+                env.events()
+                    .publish((symbol_short!("btch_skip"), EVT_NS, meter_id.clone()), ());
+                results.push_back(BatchRegisterResult {
+                    meter_id: meter_id.clone(),
+                    success: false,
+                    error: Some(String::from_str(&env, "duplicate_in_batch")),
+                });
+                continue;
+            }
+            let key = DataKey::Meter(meter_id.clone());
+            if env.storage().persistent().has(&key) {
+                env.events()
+                    .publish((symbol_short!("btch_skip"), EVT_NS, meter_id.clone()), ());
+                results.push_back(BatchRegisterResult {
+                    meter_id: meter_id.clone(),
+                    success: false,
+                    error: Some(String::from_str(&env, "meter_already_exists")),
+                });
+                continue;
+            }
+            if !allowlist.contains(&owner) {
+                env.events()
+                    .publish((symbol_short!("btch_skip"), EVT_NS, meter_id.clone()), ());
+                results.push_back(BatchRegisterResult {
+                    meter_id: meter_id.clone(),
+                    success: false,
+                    error: Some(String::from_str(&env, "owner_not_allowlisted")),
+                });
                 continue;
             }
             seen.push_back(meter_id.clone());
@@ -616,13 +665,22 @@ impl SolarGridContract {
             env.storage().persistent().set(&owner_key, &owner_list);
 
             global_list.push_back(meter_id.clone());
+            registered_count = registered_count.saturating_add(1);
 
             env.events()
-                .publish(("meter", "registered"), (meter_id.clone(), owner.clone()));
-            results.push_back(true);
+                .publish((EVT_NS, symbol_short!("mtr_reg"), meter_id.clone()), owner.clone());
+            results.push_back(BatchRegisterResult {
+                meter_id: meter_id.clone(),
+                success: true,
+                error: None,
+            });
         }
 
         env.storage().instance().set(&METER_LIST, &global_list);
+        let count: u32 = env.storage().instance().get(&METER_COUNT).unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&METER_COUNT, &(count.saturating_add(registered_count)));
         Ok(results)
     }
 
@@ -1430,8 +1488,14 @@ impl SolarGridContract {
         if new_balance == 0 && meter.active {
             meter.active = false;
             env.storage().persistent().set(&key, &meter);
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason: Symbol::new(&env, "balance_zero"),
+                    timestamp: env.ledger().timestamp(),
+                },
+            );
         }
 
         // Reverse the admin's tracked revenue for the refunded amount, so the
@@ -2045,11 +2109,7 @@ impl SolarGridContract {
             (EVT_NS, symbol_short!("usg_upd"), meter_id.clone()),
             (units, cost),
         );
-        // meter_deactivated — only when balance drained to zero
-        if deactivated {
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id), ());
-        }
+        // meter_deactivated event is emitted directly inside apply_usage if deactivated
         Ok(())
     }
 
@@ -2136,10 +2196,22 @@ impl SolarGridContract {
             env.events()
                 .publish((EVT_NS, symbol_short!("mtr_actv"), meter_id.clone()), ());
         } else {
-            env.events()
-                .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+            let now = env.ledger().timestamp();
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason: Symbol::new(&env, "admin_action"),
+                    timestamp: now,
+                },
+            );
         }
         Ok(())
+    }
+
+    /// Admin can manually toggle meter access (alias for set_active, #811).
+    pub fn set_meter_active(env: Env, meter_id: String, active: bool) -> Result<(), ContractError> {
+        Self::set_active(env, meter_id, active)
     }
 
     /// Admin-only: immediately deactivate a meter (e.g. for non-paying
@@ -2147,7 +2219,7 @@ impl SolarGridContract {
     /// deactivation that doesn't require passing a boolean flag.
     ///
     /// Emits:
-    /// - `meter_deactivated { meter_id }`
+    /// - `meter_deactivated { meter_id, reason, timestamp }`
     pub fn deactivate_meter(env: Env, meter_id: String) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let key = DataKey::Meter(meter_id.clone());
@@ -2155,8 +2227,15 @@ impl SolarGridContract {
         meter.active = false;
         env.storage().persistent().set(&key, &meter);
 
-        env.events()
-            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id), ());
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+            MeterDeactivated {
+                meter_id,
+                reason: Symbol::new(&env, "admin_action"),
+                timestamp: now,
+            },
+        );
         Ok(())
     }
 
@@ -2194,6 +2273,7 @@ impl SolarGridContract {
         let mut results: Vec<BatchDeactivateResult> = vec![&env];
         let mut deactivated: u32 = 0;
         let mut skipped: u32 = 0;
+        let now = env.ledger().timestamp();
 
         for meter_id in meter_ids.iter() {
             let key = DataKey::Meter(meter_id.clone());
@@ -2232,8 +2312,14 @@ impl SolarGridContract {
                             reason: String::from_str(&env, "ok"),
                         });
 
-                        env.events()
-                            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
+                        env.events().publish(
+                            (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                            MeterDeactivated {
+                                meter_id: meter_id.clone(),
+                                reason: Symbol::new(&env, "admin_action"),
+                                timestamp: now,
+                            },
+                        );
                     }
                 }
             }
@@ -2245,6 +2331,14 @@ impl SolarGridContract {
             skipped,
             results,
         })
+    }
+
+    /// Admin-only: alias for batch_deactivate_meters (#811).
+    pub fn batch_deactivate(
+        env: Env,
+        meter_ids: Vec<String>,
+    ) -> Result<BatchDeactivateSummary, ContractError> {
+        Self::batch_deactivate_meters(env, meter_ids)
     }
 
     // ── Collaborator management ───────────────────────────────────────────────
@@ -2618,10 +2712,7 @@ impl SolarGridContract {
                         (EVT_NS, symbol_short!("usg_upd"), meter_id.clone()),
                         (units, cost),
                     );
-                    if deactivated {
-                        env.events()
-                            .publish((EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()), ());
-                    }
+                    // meter_deactivated event is emitted directly inside apply_usage if deactivated
                 }
                 Err(_) => {
                     failed.push_back(meter_id.clone());
@@ -2678,50 +2769,54 @@ impl SolarGridContract {
         // Issue #695: Retrieve balance from storage with overflow protection
         let bal_key = DataKey::MeterBalance(meter_id.clone());
         let balance: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
-        // Use saturating_sub to prevent underflow; clamp to 0 to ensure non-negative balance
-        let bal_key = DataKey::MeterBalance(meter_id.clone());
-        let balance: i128 = env.storage().persistent().get(&bal_key).unwrap_or(0);
         let new_balance = balance.saturating_sub(cost).max(0);
         env.storage().persistent().set(&bal_key, &new_balance);
         meter.units_used = meter.units_used.saturating_add(units);
 
         let deactivated;
+        let mut deactivation_reason: Option<Symbol> = None;
         if new_balance == 0 {
             let grace_period = Self::get_grace_period(env.clone());
             if grace_period == 0 {
                 meter.active = false;
                 meter.grace_expires_at = None;
                 deactivated = true;
+                deactivation_reason = Some(Symbol::new(env, "balance_zero"));
             } else {
-                if meter.grace_expires_at.is_none() {
-                    // Closes #745: use checked_add for grace period timestamp to
-                    // prevent overflow if grace_period is set to an extreme value.
-                    let grace_exp = now
-                        .checked_add(grace_period)
-                        .unwrap_or(u64::MAX);
-                    // Start grace period without compounding
-                    meter.grace_expires_at = Some(grace_exp);
-                    deactivated = false;
-                } else if let Some(grace_exp) = meter.grace_expires_at {
-                    if now >= grace_exp {
-                        meter.active = false;
-                        deactivated = true;
-                    } else {
+                match meter.grace_expires_at {
+                    None => {
+                        // Closes #745: use checked_add for grace period timestamp to
+                        // prevent overflow if grace_period is set to an extreme value.
+                        let grace_exp = now.checked_add(grace_period).unwrap_or(u64::MAX);
+                        meter.grace_expires_at = Some(grace_exp);
                         deactivated = false;
                     }
-                } else {
-                    meter.active = false;
-                    deactivated = true;
-                } else {
-                    deactivated = false;
+                    Some(grace_exp) => {
+                        if now >= grace_exp {
+                            meter.active = false;
+                            deactivated = true;
+                            deactivation_reason = Some(Symbol::new(env, "expiry"));
+                        } else {
+                            deactivated = false;
+                        }
+                    }
                 }
-            } else {
-                meter.active = false;
-                deactivated = true;
             }
         } else {
             meter.grace_expires_at = None;
             deactivated = false;
+        }
+
+        if deactivated {
+            let reason = deactivation_reason.unwrap_or_else(|| Symbol::new(env, "balance_zero"));
+            env.events().publish(
+                (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()),
+                MeterDeactivated {
+                    meter_id: meter_id.clone(),
+                    reason,
+                    timestamp: now,
+                },
+            );
         }
         Ok(deactivated)
     }
@@ -5524,6 +5619,7 @@ mod tests {
         // set_active(false) is the last invocation — events().all() returns only its events
         client.set_active(&meter_id, &false);
 
+        let now = env.ledger().timestamp();
         assert_eq!(
             env.events().all(),
             vec![
@@ -5531,7 +5627,12 @@ mod tests {
                 (
                     client.address.clone(),
                     (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()).into_val(&env),
-                    ().into_val(&env),
+                    MeterDeactivated {
+                        meter_id: meter_id.clone(),
+                        reason: Symbol::new(&env, "admin_action"),
+                        timestamp: now,
+                    }
+                    .into_val(&env),
                 ),
             ]
         );
@@ -5552,6 +5653,7 @@ mod tests {
         // deactivate_meter is the last invocation
         client.deactivate_meter(&meter_id);
 
+        let now = env.ledger().timestamp();
         assert_eq!(
             env.events().all(),
             vec![
@@ -5559,7 +5661,12 @@ mod tests {
                 (
                     client.address.clone(),
                     (EVT_NS, symbol_short!("mtr_deact"), meter_id.clone()).into_val(&env),
-                    ().into_val(&env),
+                    MeterDeactivated {
+                        meter_id: meter_id.clone(),
+                        reason: Symbol::new(&env, "admin_action"),
+                        timestamp: now,
+                    }
+                    .into_val(&env),
                 ),
             ]
         );
@@ -6019,4 +6126,99 @@ mod tests {
         let failed = client.batch_update_usage(&updates);
         assert_eq!(failed.len(), 0);
     }
+
+    // ── Issue #818: Bulk Meter Registration ──────────────────────────────────
+
+    #[test]
+    fn test_batch_register_meters_success() {
+        let (env, client, _admin) = setup();
+        let u1 = Address::generate(&env);
+        let u2 = Address::generate(&env);
+        client.allowlist_add(&u1);
+        client.allowlist_add(&u2);
+
+        let m1 = String::from_str(&env, "BREG_1");
+        let m2 = String::from_str(&env, "BREG_2");
+
+        let batch = soroban_sdk::vec![
+            &env,
+            (m1.clone(), u1.clone()),
+            (m2.clone(), u2.clone()),
+        ];
+        let results = client.batch_register_meters(&batch);
+        assert_eq!(results.len(), 2);
+        assert!(results.get(0).unwrap().success);
+        assert_eq!(results.get(0).unwrap().error, None);
+        assert!(results.get(1).unwrap().success);
+        assert_eq!(results.get(1).unwrap().error, None);
+
+        // Verify meters are registered
+        let meter1 = client.get_meter(&m1);
+        assert_eq!(meter1.owner, u1);
+        assert!(!meter1.active);
+    }
+
+    #[test]
+    fn test_batch_register_meters_partial_failures() {
+        let (env, client, _admin) = setup();
+        let u1 = Address::generate(&env);
+        let u2_unlisted = Address::generate(&env);
+        client.allowlist_add(&u1);
+
+        let m1 = String::from_str(&env, "BPART_1");
+        let m2 = String::from_str(&env, "BPART_2");
+        let m_empty = String::from_str(&env, "");
+
+        // Pre-register m1
+        client.register_meter(&m1, &u1);
+
+        let batch = soroban_sdk::vec![
+            &env,
+            (m1.clone(), u1.clone()), // already exists
+            (m2.clone(), u2_unlisted.clone()), // unlisted owner
+            (m_empty.clone(), u1.clone()), // empty meter id
+            (m2.clone(), u1.clone()), // valid
+            (m2.clone(), u1.clone()), // duplicate in batch
+        ];
+
+        let results = client.batch_register_meters(&batch);
+        assert_eq!(results.len(), 5);
+        assert!(!results.get(0).unwrap().success);
+        assert_eq!(results.get(0).unwrap().error, Some(String::from_str(&env, "meter_already_exists")));
+
+        assert!(!results.get(1).unwrap().success);
+        assert_eq!(results.get(1).unwrap().error, Some(String::from_str(&env, "owner_not_allowlisted")));
+
+        assert!(!results.get(2).unwrap().success);
+        assert_eq!(results.get(2).unwrap().error, Some(String::from_str(&env, "empty_meter_id")));
+
+        assert!(results.get(3).unwrap().success);
+        assert_eq!(results.get(3).unwrap().error, None);
+
+        assert!(!results.get(4).unwrap().success);
+        assert_eq!(results.get(4).unwrap().error, Some(String::from_str(&env, "duplicate_in_batch")));
+    }
+
+    #[test]
+    fn test_batch_register_meters_too_large() {
+        let (env, client, _admin) = setup();
+        let user = Address::generate(&env);
+        client.allowlist_add(&user);
+
+        let mut batch = vec![&env];
+        for i in 0..51 {
+            let mut id_bytes = [b'M', b'T', b'R', b'_', b'0', b'0', b'0'];
+            id_bytes[4] = b'0' + ((i / 100) % 10) as u8;
+            id_bytes[5] = b'0' + ((i / 10) % 10) as u8;
+            id_bytes[6] = b'0' + (i % 10) as u8;
+            let m_id = String::from_bytes(&env, &id_bytes);
+            batch.push_back((m_id, user.clone()));
+        }
+
+        assert_eq!(
+            client.try_batch_register_meters(&batch),
+            Err(Ok(ContractError::BatchTooLarge))
+        );
+    }
 }
+

@@ -309,6 +309,7 @@ app.use("/api/usage", usageRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/meters", insightsRouter);
 app.use("/api/graphql", graphqlRouter);
+app.use("/graphql", graphqlRouter);
 app.use("/api/provider", providerRouter);
 
 // â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

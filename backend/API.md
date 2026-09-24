@@ -128,6 +128,48 @@ Request body:
   `batch_skip` event in `contracts/README.md`).
 - Response: `{ "hash": "<tx_hash>", "meter_ids": [...] }`.
 
+## Meter Search by Location
+
+### `GET /api/meters/search`
+
+Search and filter meters by location metadata. Supports case-insensitive partial matching and pagination.
+
+**Query Parameters**
+
+| Parameter  | Type    | Required | Default | Description |
+|------------|---------|----------|---------|-------------|
+| `location` | string  | Yes      | -       | Location or region substring to search for (case-insensitive) |
+| `page`     | integer | No       | `1`     | Page number (>= 1) |
+| `pageSize` | integer | No       | `20`    | Number of results per page (1–100) |
+
+**Example Request**
+
+```http
+GET /api/meters/search?location=Building+A&page=1&pageSize=20
+```
+
+**Response `200`**
+
+```json
+{
+  "meters": [
+    {
+      "id": "METER1",
+      "owner": "GABC...XYZ",
+      "metadata": {
+        "location": "Building A - Floor 2"
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 20,
+    "total": 1,
+    "pages": 1
+  }
+}
+```
+
 ## Low-Balance Webhook Notifications
 
 Providers can register webhook URLs to receive notifications when a customer's meter balance drops below a configurable threshold.
@@ -704,92 +746,80 @@ Hard-deletes submitted events older than N days **without** aggregating them
 first — use `POST /api/usage-events/compact` instead unless you specifically
 want to discard the history rather than roll it up. Requires `X-Admin-Key`.
 
----
+## GraphQL API
 
-## Usage History
+Endpoint: `/graphql` (also accessible at `/api/graphql`)
 
-The `/api/usage` endpoints store and serve historical usage updates for meters.
+Provides unified querying for meters, payments, and usage events in a single round-trip.
 
-### `POST /api/usage/:meterId`
+### Development Playground
 
-Logs a usage update for the specified meter into `usage_history`.
+In development mode (`NODE_ENV !== "production"`), navigating to `GET /graphql` opens an interactive GraphQL Playground in the browser.
 
-**Path Parameters**
+### Schema Queries
 
-| Parameter | Required | Description |
-| --------- | -------- | ----------- |
-| `meterId` | Yes      | The unique identifier of the meter |
+#### `meter(id: String!): Meter`
+Query meter details, current balance, associated payments, and paginated usage history.
 
-**Body**
-
-```json
-{
-  "units": 50,
-  "balance_before": 5000000,
-  "balance_after": 4500000,
-  "timestamp": "2026-09-24T08:00:00.000Z"
-}
-```
-
-- `units` (number, required): Units consumed (non-negative number).
-- `balance_before` (number, required): Balance before the usage update.
-- `balance_after` (number, required): Balance after the usage update.
-- `timestamp` (string, optional): ISO-8601 timestamp. Defaults to current server time if omitted.
-
-**Response `201`**
-
-```json
-{
-  "id": 1,
-  "meter_id": "METER1",
-  "units": 50,
-  "balance_before": 5000000,
-  "balance_after": 4500000,
-  "timestamp": "2026-09-24T08:00:00.000Z"
-}
-```
-
-### `GET /api/usage/:meterId`
-
-Fetch paginated usage history for a meter, ordered newest first.
-
-**Path Parameters**
-
-| Parameter | Required | Description |
-| --------- | -------- | ----------- |
-| `meterId` | Yes      | The unique identifier of the meter |
-
-**Query Parameters**
-
-| Parameter | Type    | Default | Description |
-| --------- | ------- | ------- | ----------- |
-| `from`    | string  | -       | ISO-8601 timestamp start filter (`timestamp >= from`) |
-| `to`      | string  | -       | ISO-8601 timestamp end filter (`timestamp <= to`) |
-| `limit`   | integer | `50`    | Number of records per page (max 100) |
-| `page`    | integer | `1`     | Page number (1-based) |
-| `offset`  | integer | -       | Row offset (overrides `page` if provided) |
-
-**Response `200`**
-
-```json
-{
-  "meterId": "METER1",
-  "history": [
-    {
-      "id": 1,
-      "meter_id": "METER1",
-      "units": 50,
-      "balance_before": 5000000,
-      "balance_after": 4500000,
-      "timestamp": "2026-09-24T08:00:00.000Z"
+```graphql
+query GetMeter($id: String!) {
+  meter(id: $id) {
+    id
+    owner
+    active
+    unitsUsed
+    plan
+    lastPayment
+    expiresAt
+    dailyLimit
+    daySpent
+    balance
+    payments {
+      txHash
+      amountXlm
+      status
+      confirmedAt
     }
-  ],
-  "pagination": {
-    "total": 1,
-    "limit": 50,
-    "offset": 0,
-    "page": 1,
-    "pages": 1
+    usageHistory(page: 1, pageSize: 10) {
+      total
+      events {
+        id
+        units
+        cost
+        receivedAt
+      }
+    }
+  }
+}
+```
+
+#### `metersByOwner(address: String!): [Meter!]!`
+Fetch all meters registered to a Stellar wallet address.
+
+```graphql
+query GetMetersByOwner($address: String!) {
+  metersByOwner(address: $address) {
+    id
+    owner
+    active
+    plan
+    balance
+  }
+}
+```
+
+#### `payments(meterId: String!): [Payment!]!`
+Fetch on-chain payments recorded for a specific meter ID.
+
+```graphql
+query GetPayments($meterId: String!) {
+  payments(meterId: $meterId) {
+    txHash
+    address
+    amountXlm
+    plan
+    status
+    confirmedAt
   }
 }
 ```
