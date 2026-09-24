@@ -27,6 +27,11 @@ import { requireAdminKey } from "../middleware/adminAuth.js";
 import { cacheFor, invalidateCache, etagFor } from "../middleware/cache.js";
 import { getMqttClient } from "../iot/mqttClient.js";
 import { RedisCache, CACHE_TTL } from "../lib/redisCache.js";
+import {
+  indexMeterLocation,
+  searchMetersByLocationIndex,
+  extractLocation,
+} from "../lib/meterMetadataIndex.js";
 
 const FALLBACK_LOW_BALANCE_THRESHOLD = Number(process.env.LOW_BALANCE_THRESHOLD ?? 1_000_000);
 
@@ -92,6 +97,86 @@ export function createMeterRouter(stellar: StellarService) {
 
       res.json({
         meters,
+        pagination: {
+          page,
+          pageSize,
+          total,
+          pages: Math.ceil(total / pageSize),
+        },
+      });
+    }),
+  );
+
+  /**
+   * GET /api/meters/search?location=Building+A — search meters by location metadata (Issue #819)
+   *
+   * Supports partial matching and case-insensitive search.
+   * Returns paginated results.
+   */
+  meterRouter.get(
+    "/search",
+    asyncHandler(async (req, res) => {
+      const location = req.query.location;
+      if (!location || typeof location !== "string" || !location.trim()) {
+        return res.status(400).json({
+          error: "location query parameter is required",
+          code: "VALIDATION_ERROR",
+        });
+      }
+
+      const page = Math.max(1, Number(req.query.page ?? 1) || 1);
+      const pageSize = Math.min(
+        100,
+        Math.max(1, Number(req.query.pageSize ?? req.query.limit ?? 20) || 20)
+      );
+      const offset = (page - 1) * pageSize;
+      const searchPattern = location.trim().toLowerCase();
+
+      // Query on-chain meters
+      let allMeters: any[] = [];
+      try {
+        const result = await stellar.query("get_all_meters", []);
+        allMeters = (StellarSdk.scValToNative(result) as any[]) ?? [];
+      } catch {
+        allMeters = [];
+      }
+
+      // Sync and index on-chain meter locations into SQLite
+      for (const m of allMeters) {
+        const mId = m.id ?? m.meter_id;
+        const loc = extractLocation(m);
+        if (mId && loc) {
+          indexMeterLocation(
+            mId,
+            loc,
+            typeof m.metadata === "object" ? m.metadata : null
+          );
+        }
+      }
+
+      let matchingMeters: any[] = [];
+
+      if (allMeters.length > 0) {
+        matchingMeters = allMeters.filter((m: any) => {
+          const loc = extractLocation(m);
+          return loc ? loc.toLowerCase().includes(searchPattern) : false;
+        });
+      } else {
+        // Fallback to SQLite indexed meters
+        const indexed = searchMetersByLocationIndex(searchPattern, 1000, 0);
+        matchingMeters = indexed.results.map((r) => ({
+          id: r.meter_id,
+          meter_id: r.meter_id,
+          location: r.location,
+          metadata: r.metadata ? JSON.parse(r.metadata) : { location: r.location },
+        }));
+      }
+
+      const total = matchingMeters.length;
+      const paginatedMeters = matchingMeters.slice(offset, offset + pageSize);
+
+      res.json({
+        meters: paginatedMeters,
         pagination: {
           page,
           pageSize,
@@ -404,6 +489,21 @@ export function createMeterRouter(stellar: StellarService) {
         return res.status(404).json({ error: "Note not found", code: "NOT_FOUND" });
       }
       res.json({ deleted: true, noteId });
+    }),
+  );
+
+  /** POST /api/meters/:id/metadata — update/index meter location metadata (admin only, Issue #819) */
+  meterRouter.post(
+    "/:id/metadata",
+    requireAdminKey,
+    asyncHandler(async (req, res) => {
+      const meterId = req.params.id;
+      const { metadata, location } = req.body ?? {};
+      const loc = location ?? metadata?.location;
+      if (loc && typeof loc === "string") {
+        indexMeterLocation(meterId, loc, metadata);
+      }
+      res.json({ success: true, meter_id: meterId, location: loc, metadata });
     }),
   );
 
