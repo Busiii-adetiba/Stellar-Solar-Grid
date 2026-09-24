@@ -1,4 +1,4 @@
-﻿import "dotenv/config";
+import "dotenv/config";
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "module";
@@ -34,6 +34,7 @@ import { usageEventsRouter } from "./routes/usageEvents.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { insightsRouter } from "./routes/insights.js";
 import { graphqlRouter } from "./routes/graphql.js";
+import { usageRouter } from "./routes/usage.js";
 import { startIoTBridge, stopIoTBridge } from "./iot/bridge.js";
 import { startLimitWatcher } from "./iot/limitWatcher.js";
 import { logger } from "./lib/logger.js";
@@ -55,6 +56,7 @@ import {
   startUsageEventRetryWorker,
 } from "./lib/usageEvents.js";
 import { initMeterNotesStore, getMeterNotesPoolStatus } from "./lib/meterNotes.js";
+import { getUsageHistoryPoolStatus } from "./lib/usageHistory.js";
 import { closeAllDatabases } from "./lib/databaseLifecycle.js";
 import { getReqId } from "./lib/requestContext.js";
 // Issue #696: Import idempotency cleanup for graceful shutdown
@@ -219,6 +221,7 @@ v1Router.use("/meters", createMeterQrRouter(stellarService));
 v1Router.use("/payments", paymentsRouter);
 v1Router.use("/receipts", receiptsRouter);
 v1Router.use("/webhooks", webhookRouter);
+v1Router.use("/usage", usageRouter);
 
 app.use("/api/v1", v1Router);
 app.use("/api", v1Router);
@@ -276,6 +279,7 @@ app.get("/metrics", async (_req, res) => {
   updateSqlitePoolMetrics([
     { name: "usage-events", status: getUsageEventPoolStatus() },
     { name: "meter-notes", status: getMeterNotesPoolStatus() },
+    { name: "usage-history", status: getUsageHistoryPoolStatus() },
   ]);
   res.end(await register.metrics());
 });
@@ -305,9 +309,11 @@ app.use("/api/push", writeLimiter, pushSubscriptionsRouter);
 app.use("/api/metrics", metricsRouter);
 app.use("/api/solar", solarRouter);
 app.use("/api/usage-events", usageEventsRouter);
+app.use("/api/usage", usageRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/meters", insightsRouter);
 app.use("/api/graphql", graphqlRouter);
+app.use("/graphql", graphqlRouter);
 app.use("/api/provider", providerRouter);
 
 // â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

@@ -128,6 +128,48 @@ Request body:
   `batch_skip` event in `contracts/README.md`).
 - Response: `{ "hash": "<tx_hash>", "meter_ids": [...] }`.
 
+## Meter Search by Location
+
+### `GET /api/meters/search`
+
+Search and filter meters by location metadata. Supports case-insensitive partial matching and pagination.
+
+**Query Parameters**
+
+| Parameter  | Type    | Required | Default | Description |
+|------------|---------|----------|---------|-------------|
+| `location` | string  | Yes      | -       | Location or region substring to search for (case-insensitive) |
+| `page`     | integer | No       | `1`     | Page number (>= 1) |
+| `pageSize` | integer | No       | `20`    | Number of results per page (1–100) |
+
+**Example Request**
+
+```http
+GET /api/meters/search?location=Building+A&page=1&pageSize=20
+```
+
+**Response `200`**
+
+```json
+{
+  "meters": [
+    {
+      "id": "METER1",
+      "owner": "GABC...XYZ",
+      "metadata": {
+        "location": "Building A - Floor 2"
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 20,
+    "total": 1,
+    "pages": 1
+  }
+}
+```
+
 ## Low-Balance Webhook Notifications
 
 Providers can register webhook URLs to receive notifications when a customer's meter balance drops below a configurable threshold.
@@ -704,18 +746,81 @@ Hard-deletes submitted events older than N days **without** aggregating them
 first — use `POST /api/usage-events/compact` instead unless you specifically
 want to discard the history rather than roll it up. Requires `X-Admin-Key`.
 
-## Payment receipts
+## GraphQL API
 
-`GET /api/receipts/:paymentId` downloads the PDF generated after a confirmed
-payment. It contains the amount, meter ID, UTC date, transaction hash, and
-invoice number. Receipt files use `RECEIPTS_STORAGE_PATH` when configured and
-otherwise live under `backend/data/receipts`. Production deployments should
-point this directory at encrypted persistent storage or an S3-compatible
-mounted volume.
+Endpoint: `/graphql` (also accessible at `/api/graphql`)
 
-## Meter installation QR codes
+Provides unified querying for meters, payments, and usage events in a single round-trip.
 
-`GET /api/meters/:meterId/qr` returns a PNG QR code whose versioned JSON payload
-contains `meter_id`, `owner`, and non-authoritative meter metadata. Scanning a
-code does not grant authorization; clients must validate the payload and still
-complete the authenticated registration transaction.
+### Development Playground
+
+In development mode (`NODE_ENV !== "production"`), navigating to `GET /graphql` opens an interactive GraphQL Playground in the browser.
+
+### Schema Queries
+
+#### `meter(id: String!): Meter`
+Query meter details, current balance, associated payments, and paginated usage history.
+
+```graphql
+query GetMeter($id: String!) {
+  meter(id: $id) {
+    id
+    owner
+    active
+    unitsUsed
+    plan
+    lastPayment
+    expiresAt
+    dailyLimit
+    daySpent
+    balance
+    payments {
+      txHash
+      amountXlm
+      status
+      confirmedAt
+    }
+    usageHistory(page: 1, pageSize: 10) {
+      total
+      events {
+        id
+        units
+        cost
+        receivedAt
+      }
+    }
+  }
+}
+```
+
+#### `metersByOwner(address: String!): [Meter!]!`
+Fetch all meters registered to a Stellar wallet address.
+
+```graphql
+query GetMetersByOwner($address: String!) {
+  metersByOwner(address: $address) {
+    id
+    owner
+    active
+    plan
+    balance
+  }
+}
+```
+
+#### `payments(meterId: String!): [Payment!]!`
+Fetch on-chain payments recorded for a specific meter ID.
+
+```graphql
+query GetPayments($meterId: String!) {
+  payments(meterId: $meterId) {
+    txHash
+    address
+    amountXlm
+    plan
+    status
+    confirmedAt
+  }
+}
+```
+
