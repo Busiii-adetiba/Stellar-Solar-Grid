@@ -197,3 +197,17 @@ The verification runs automatically on every `contract-v*` tag push via `.github
 
 - **Hash WASM artifact** — runs immediately after `Build WASM`; records the digest in the step summary.
 - **Verify on-chain WASM hash** — runs after `Deploy to testnet`; fetches the on-chain hash with `stellar contract info` and fails the job if it does not match the locally computed digest.
+
+## Time-of-use pricing (Issue #857)
+
+`PricingSchedule` contains separate `weekday` and `weekend` vectors of
+`PricingWindow { start_minute, end_minute, rate }` values. Minutes are UTC
+minutes from midnight and ranges are half-open. `set_pricing_schedule` is
+admin-only and rejects non-positive rates, reversed ranges, ranges outside the
+day, and overlapping windows. `get_current_rate` selects the weekday or
+weekend schedule from the ledger timestamp. A gap falls back to the configured
+unit price, preserving the previous pricing behavior.
+
+Usage cost calculation uses the same effective rate, so a caller cannot choose
+a cheaper rate by supplying a client-side timestamp. The schedule is stored in
+instance storage and is replaced atomically after validation.

@@ -703,3 +703,19 @@ is optional (omit for all meters); `limit` caps the number of rows (default
 Hard-deletes submitted events older than N days **without** aggregating them
 first — use `POST /api/usage-events/compact` instead unless you specifically
 want to discard the history rather than roll it up. Requires `X-Admin-Key`.
+
+## Payment receipts
+
+`GET /api/receipts/:paymentId` downloads the PDF generated after a confirmed
+payment. It contains the amount, meter ID, UTC date, transaction hash, and
+invoice number. Receipt files use `RECEIPTS_STORAGE_PATH` when configured and
+otherwise live under `backend/data/receipts`. Production deployments should
+point this directory at encrypted persistent storage or an S3-compatible
+mounted volume.
+
+## Meter installation QR codes
+
+`GET /api/meters/:meterId/qr` returns a PNG QR code whose versioned JSON payload
+contains `meter_id`, `owner`, and non-authoritative meter metadata. Scanning a
+code does not grant authorization; clients must validate the payload and still
+complete the authenticated registration transaction.
