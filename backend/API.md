@@ -128,6 +128,48 @@ Request body:
   `batch_skip` event in `contracts/README.md`).
 - Response: `{ "hash": "<tx_hash>", "meter_ids": [...] }`.
 
+## Meter Search by Location
+
+### `GET /api/meters/search`
+
+Search and filter meters by location metadata. Supports case-insensitive partial matching and pagination.
+
+**Query Parameters**
+
+| Parameter  | Type    | Required | Default | Description |
+|------------|---------|----------|---------|-------------|
+| `location` | string  | Yes      | -       | Location or region substring to search for (case-insensitive) |
+| `page`     | integer | No       | `1`     | Page number (>= 1) |
+| `pageSize` | integer | No       | `20`    | Number of results per page (1–100) |
+
+**Example Request**
+
+```http
+GET /api/meters/search?location=Building+A&page=1&pageSize=20
+```
+
+**Response `200`**
+
+```json
+{
+  "meters": [
+    {
+      "id": "METER1",
+      "owner": "GABC...XYZ",
+      "metadata": {
+        "location": "Building A - Floor 2"
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 20,
+    "total": 1,
+    "pages": 1
+  }
+}
+```
+
 ## Low-Balance Webhook Notifications
 
 Providers can register webhook URLs to receive notifications when a customer's meter balance drops below a configurable threshold.
