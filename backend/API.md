@@ -703,3 +703,94 @@ is optional (omit for all meters); `limit` caps the number of rows (default
 Hard-deletes submitted events older than N days **without** aggregating them
 first — use `POST /api/usage-events/compact` instead unless you specifically
 want to discard the history rather than roll it up. Requires `X-Admin-Key`.
+
+---
+
+## Usage History
+
+The `/api/usage` endpoints store and serve historical usage updates for meters.
+
+### `POST /api/usage/:meterId`
+
+Logs a usage update for the specified meter into `usage_history`.
+
+**Path Parameters**
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `meterId` | Yes      | The unique identifier of the meter |
+
+**Body**
+
+```json
+{
+  "units": 50,
+  "balance_before": 5000000,
+  "balance_after": 4500000,
+  "timestamp": "2026-09-24T08:00:00.000Z"
+}
+```
+
+- `units` (number, required): Units consumed (non-negative number).
+- `balance_before` (number, required): Balance before the usage update.
+- `balance_after` (number, required): Balance after the usage update.
+- `timestamp` (string, optional): ISO-8601 timestamp. Defaults to current server time if omitted.
+
+**Response `201`**
+
+```json
+{
+  "id": 1,
+  "meter_id": "METER1",
+  "units": 50,
+  "balance_before": 5000000,
+  "balance_after": 4500000,
+  "timestamp": "2026-09-24T08:00:00.000Z"
+}
+```
+
+### `GET /api/usage/:meterId`
+
+Fetch paginated usage history for a meter, ordered newest first.
+
+**Path Parameters**
+
+| Parameter | Required | Description |
+| --------- | -------- | ----------- |
+| `meterId` | Yes      | The unique identifier of the meter |
+
+**Query Parameters**
+
+| Parameter | Type    | Default | Description |
+| --------- | ------- | ------- | ----------- |
+| `from`    | string  | -       | ISO-8601 timestamp start filter (`timestamp >= from`) |
+| `to`      | string  | -       | ISO-8601 timestamp end filter (`timestamp <= to`) |
+| `limit`   | integer | `50`    | Number of records per page (max 100) |
+| `page`    | integer | `1`     | Page number (1-based) |
+| `offset`  | integer | -       | Row offset (overrides `page` if provided) |
+
+**Response `200`**
+
+```json
+{
+  "meterId": "METER1",
+  "history": [
+    {
+      "id": 1,
+      "meter_id": "METER1",
+      "units": 50,
+      "balance_before": 5000000,
+      "balance_after": 4500000,
+      "timestamp": "2026-09-24T08:00:00.000Z"
+    }
+  ],
+  "pagination": {
+    "total": 1,
+    "limit": 50,
+    "offset": 0,
+    "page": 1,
+    "pages": 1
+  }
+}
+```
+
