@@ -7,6 +7,7 @@ import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Skeleton } from "@/components/Skeleton";
 import UsageChart, { type UsageDataPoint } from "@/components/UsageChart";
 import UsageForecast from "@/components/UsageForecast";
+import EnergyInsights from "@/components/EnergyInsights";
 import { MeterSearchBar, type StatusFilter } from "@/components/MeterSearchBar";
 import { fuzzyMatch } from "@/lib/fuzzySearch";
 import { useWalletStore } from "@/store/walletStore";

@@ -6,7 +6,7 @@ import { useTranslations } from "next-intl";
 import { useWalletStore } from "@/store/walletStore";
 import { WalletConnectButton } from "@/components/WalletConnectButton";
 import { NetworkMismatchBanner } from "@/components/NetworkMismatchBanner";
-import { useLocale } from "@/components/I18nProvider";
+import { useLocale, type Locale, LOCALE_OPTIONS } from "@/components/I18nProvider";
 import { branding } from "@/lib/branding";
 
 export default function Navbar() {

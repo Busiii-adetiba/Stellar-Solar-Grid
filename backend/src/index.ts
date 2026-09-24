@@ -17,6 +17,8 @@ import * as OpenApiValidator from "express-openapi-validator";
 import { stellarService, server } from "./lib/stellar.js";
 import { createMeterRouter } from "./routes/meters.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { receiptsRouter } from "./routes/receipts.js";
+import { createMeterQrRouter } from "./routes/meterQr.js";
 import { webhookRouter } from "./routes/webhooks.js";
 import { statsRouter } from "./routes/stats.js";
 import { collaboratorRouter } from "./routes/collaborators.js";
@@ -215,7 +217,9 @@ app.use(
 // date (see docs/API_VERSIONING.md).
 const v1Router = express.Router();
 v1Router.use("/meters", createMeterRouter(stellarService));
+v1Router.use("/meters", createMeterQrRouter(stellarService));
 v1Router.use("/payments", paymentsRouter);
+v1Router.use("/receipts", receiptsRouter);
 v1Router.use("/webhooks", webhookRouter);
 v1Router.use("/usage", usageRouter);
 

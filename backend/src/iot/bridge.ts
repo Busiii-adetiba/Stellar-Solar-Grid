@@ -245,19 +245,13 @@ async function checkAndNotifyLowBalance(meterId: string) {
         headers["X-SolarGrid-Signature"] = `sha256=${signature}`;
       }
 
+      if (webhookUrl) {
         await fetch(webhookUrl, {
           method: "POST",
           headers,
           body,
         });
       }
-
-      // Fire webhooks registered via the webhook registry — each is signed
-      // with its own secret (or WEBHOOK_SECRET) inside fireWebhook, and
-      // retried automatically on failure.
-      await Promise.all(
-        [...urls].map((url) => fireWebhook(url, body)),
-      );
 
       logger.info("Low balance notifications fired", { meterId, balance });
     }

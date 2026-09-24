@@ -7,6 +7,7 @@ import { logger } from "../lib/logger.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { sendPaymentWebhook, stroopsToXlm } from "../lib/paymentWebhook.js";
+import { saveReceipt } from "../lib/receipts.js";
 
 export const paymentsRouter = Router();
 
@@ -106,6 +107,13 @@ paymentsRouter.post(
       StellarSdk.nativeToScVal(payer, { type: "address" }),
       memoScVal,
     ]);
+    saveReceipt({
+      paymentId: hash,
+      amount,
+      meterId,
+      date: new Date().toISOString(),
+      transactionHash: hash,
+    });
 
     // Issue #692: Send webhook notification for successful payment
     // Fire async webhook in background without blocking response

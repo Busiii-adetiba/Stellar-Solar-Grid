@@ -89,6 +89,8 @@ const MAX_PAUSE_DURATION: u64 = 48 * 60 * 60;
 const DEFAULT_UNIT_PRICE: i128 = 1;
 /// Storage key for the on-chain unit price.
 const UNIT_PRICE: Symbol = symbol_short!("U_PRICE");
+const PRICING_SCHEDULE: Symbol = symbol_short!("TOU_SCH");
+const MINUTES_PER_DAY: u32 = 24 * 60;
 const MULTISIG_ADMINS: Symbol = symbol_short!("MS_ADM");
 const MULTISIG_THRESHOLD: Symbol = symbol_short!("MS_THR");
 const PROPOSAL_COUNT: Symbol = symbol_short!("MS_CNT");
@@ -116,6 +118,19 @@ pub enum PaymentPlan {
     Weekly,
     Monthly,
     UsageBased,
+}
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PricingWindow {
+    pub start_minute: u32,
+    pub end_minute: u32,
+    pub rate: i128,
+}
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PricingSchedule {
+    pub weekday: Vec<PricingWindow>,
+    pub weekend: Vec<PricingWindow>,
 }
 
 #[contracttype]
@@ -1996,6 +2011,35 @@ impl SolarGridContract {
             .unwrap_or(DEFAULT_UNIT_PRICE)
     }
 
+    /// Store validated weekday/weekend windows. All timestamps are interpreted as UTC.
+    pub fn set_pricing_schedule(env: Env, schedule: PricingSchedule) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        Self::validate_pricing_windows(&schedule.weekday)?;
+        Self::validate_pricing_windows(&schedule.weekend)?;
+        env.storage().instance().set(&PRICING_SCHEDULE, &schedule);
+        env.events().publish((EVT_NS, symbol_short!("tou_set")), (schedule.weekday.len(), schedule.weekend.len()));
+        Ok(())
+    }
+    /// Return the effective rate for the current ledger timestamp.
+    pub fn get_current_rate(env: Env) -> i128 { Self::rate_at(&env, env.ledger().timestamp()) }
+    fn validate_pricing_windows(windows: &Vec<PricingWindow>) -> Result<(), ContractError> {
+        let mut previous_end = 0u32;
+        for window in windows.iter() {
+            if window.start_minute >= window.end_minute || window.end_minute > MINUTES_PER_DAY || window.rate <= 0 || window.start_minute < previous_end {
+                return Err(ContractError::InvalidConfiguration);
+            }
+            previous_end = window.end_minute;
+        }
+        Ok(())
+    }
+    fn rate_at(env: &Env, timestamp: u64) -> i128 {
+        let schedule: Option<PricingSchedule> = env.storage().instance().get(&PRICING_SCHEDULE);
+        let Some(schedule) = schedule else { return Self::get_unit_price(env.clone()); };
+        let day = ((timestamp / SECONDS_PER_DAY) + 4) % 7;
+        let minute = ((timestamp % SECONDS_PER_DAY) / 60) as u32;
+        let windows = if day == 0 || day == 6 { schedule.weekend } else { schedule.weekday };
+        windows.iter().find(|w| minute >= w.start_minute && minute < w.end_minute).map(|w| w.rate).unwrap_or_else(|| Self::get_unit_price(env.clone()))
+    }
     /// Compute the cost in stroops for `units` (milli-kWh) using the current
     /// unit price (Issue #733).
     ///
@@ -2004,7 +2048,7 @@ impl SolarGridContract {
     /// [`ContractError::InvalidConfiguration`] instead of dividing by zero and
     /// panicking the contract.
     pub fn compute_cost(env: Env, units: u64) -> Result<i128, ContractError> {
-        let price = Self::get_unit_price(env.clone());
+        let price = Self::rate_at(&env, env.ledger().timestamp());
         if price <= 0 {
             return Err(ContractError::InvalidConfiguration);
         }
