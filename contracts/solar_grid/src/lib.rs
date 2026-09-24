@@ -727,6 +727,97 @@ impl SolarGridContract {
     /// The new owner must already be on the allowlist.
     ///
     /// Emits `mtr_xfr` with topics `(EVT_NS, mtr_xfr, meter_id)` and data
+    /// Transfer meter ownership to a new address.
+    /// Only the current meter owner or contract admin can perform this transfer.
+    /// Emits `MeterTransferred` event with `(old_owner, new_owner, meter_id)`
+    /// and updates `OwnerMeters` index for both addresses.
+    pub fn transfer_meter(
+        env: Env,
+        meter_id: String,
+        new_owner: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+        let key = DataKey::Meter(meter_id.clone());
+        let mut meter = Self::get_meter_or_error(&env, &key)?;
+
+        meter.owner.require_auth();
+
+        let allowlist = Self::get_allowlist(env.clone())?;
+        if !allowlist.contains(&new_owner) {
+            return Err(ContractError::OwnerNotAllowlisted);
+        }
+
+        let old_owner = meter.owner.clone();
+
+        // Remove meter_id from old owner's index
+        let old_key = DataKey::OwnerMeters(old_owner.clone());
+        let old_list: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .unwrap_or_else(|| vec![&env]);
+        let mut filtered: Vec<String> = vec![&env];
+        for id in old_list.iter() {
+            if id != meter_id {
+                filtered.push_back(id);
+            }
+        }
+        env.storage().persistent().set(&old_key, &filtered);
+
+        // Add meter_id to new owner's index
+        let new_key = DataKey::OwnerMeters(new_owner.clone());
+        let mut new_list: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&new_key)
+            .unwrap_or_else(|| vec![&env]);
+        new_list.push_back(meter_id.clone());
+        env.storage().persistent().set(&new_key, &new_list);
+
+        meter.owner = new_owner.clone();
+        // A transfer starts a fresh usage accounting period while preserving
+        // the prepaid meter balance for the incoming owner.
+        meter.units_used = 0;
+        env.storage().persistent().set(&key, &meter);
+
+        let history_key = DataKey::OwnershipHistory(meter_id.clone());
+        let mut history: Vec<OwnershipTransfer> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| vec![&env]);
+        history.push_back(OwnershipTransfer {
+            old_owner: old_owner.clone(),
+            new_owner: new_owner.clone(),
+            transferred_at: env.ledger().timestamp(),
+        });
+        while history.len() > MAX_OWNERSHIP_HISTORY {
+            let mut trimmed: Vec<OwnershipTransfer> = vec![&env];
+            for i in 1..history.len() {
+                if let Some(entry) = history.get(i) {
+                    trimmed.push_back(entry);
+                }
+            }
+            history = trimmed;
+        }
+        env.storage().persistent().set(&history_key, &history);
+
+        env.events().publish(
+            (EVT_NS, Symbol::new(&env, "MeterTransferred"), meter_id.clone()),
+            (old_owner.clone(), new_owner.clone(), meter_id.clone()),
+        );
+        env.events().publish(
+            (EVT_NS, symbol_short!("mtr_xfer"), meter_id),
+            (old_owner, new_owner),
+        );
+        Ok(())
+    }
+
+    /// Transfer meter ownership from the current owner to a new owner.
+    /// Both the current owner and the new owner must authorize this call.
+    /// The new owner must already be on the allowlist.
+    ///
+    /// Emits `mtr_xfr` with topics `(EVT_NS, mtr_xfr, meter_id)` and data
     /// `(old_owner, new_owner)` so the bridge can detect ownership changes
     /// without polling every meter.
     pub fn transfer_meter_ownership(
@@ -3551,6 +3642,43 @@ mod tests {
         });
         assert!(found, "mtr_xfer event with new owner not emitted");
         assert_eq!(client.get_meter(&meter_id).owner, new_owner);
+    }
+
+    #[test]
+    fn test_transfer_meter_success() {
+        let (env, client, _admin) = setup();
+        let old_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meter_id = String::from_str(&env, "MTR_XFER1");
+
+        allowlist_and_register(&client, &meter_id, &old_owner);
+        client.allowlist_add(&new_owner);
+
+        let old_meters_before = client.get_meters_by_owner(&old_owner);
+        assert!(old_meters_before.contains(&meter_id));
+
+        client.transfer_meter(&meter_id, &new_owner);
+
+        let meter = client.get_meter(&meter_id);
+        assert_eq!(meter.owner, new_owner);
+
+        let old_meters_after = client.get_meters_by_owner(&old_owner);
+        assert!(!old_meters_after.contains(&meter_id));
+
+        let new_meters_after = client.get_meters_by_owner(&new_owner);
+        assert!(new_meters_after.contains(&meter_id));
+    }
+
+    #[test]
+    fn test_transfer_meter_unauthorized_new_owner_not_allowlisted() {
+        let (env, client, _admin) = setup();
+        let old_owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let meter_id = String::from_str(&env, "MTR_XFER2");
+
+        allowlist_and_register(&client, &meter_id, &old_owner);
+        let res = client.try_transfer_meter(&meter_id, &new_owner);
+        assert_eq!(res, Err(Ok(ContractError::OwnerNotAllowlisted)));
     }
 
     /// register 3 meters for the same owner — get_meters_by_owner returns all 3.

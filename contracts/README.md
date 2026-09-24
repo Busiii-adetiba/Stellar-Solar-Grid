@@ -69,6 +69,14 @@ or already inactive.
 
 Emitted when the provider withdraws accumulated revenue.
 
+#### meter_transferred (MeterTransferred)
+- **Topic 0:** `solargrid` (EVT_NS)
+- **Topic 1:** `MeterTransferred`
+- **Topic 2:** `meter_id` (String)
+- **Data:** `(old_owner: Address, new_owner: Address, meter_id: String)`
+
+Emitted when meter ownership is transferred via `transfer_meter(meter_id, new_owner)`. Updates `OwnerMeters` index for both old and new owners, resets `units_used` for the new owner, and requires authorization from the current owner or admin.
+
 #### discount_created / discount_revoked / discount_applied
 
 Closes #687 — promotional discount codes.
