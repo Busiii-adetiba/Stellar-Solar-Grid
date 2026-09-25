@@ -98,6 +98,21 @@ Closes #686 — timelocked emergency admin withdrawal. `emergency_withdraw(amoun
 
 `emergency_withdraw` requires the contract to be frozen (`freeze_contract`) and caps `amount` at `TOTAL_REVENUE` — cumulative gross revenue ever collected via `make_payment`/`make_payment_with_discount` — so a compromised admin key can't drain more than customers have actually paid in, regardless of the contract's raw token balance.
 
+#### proposal_created / vote_cast / proposal_executed
+
+Closes #845 — community governance for contract parameter changes. Any user may open a proposal to change a governed parameter; voting weight is derived from stake or meter ownership; execution is only possible after the voting period ends and the quorum is met.
+
+- `proposal_created` — topics `(solargrid, prop_new, proposal_id: u64)`, data `(proposer: Address, param: Symbol, new_value: i128, voting_ends_at: u64, expires_at: u64)`. Emitted by `propose_parameter_change`.
+- `vote_cast` — topics `(solargrid, vote_cast, proposal_id: u64)`, data `(voter: Address, weight: i128, in_favor: bool)`. Emitted by `vote_on_proposal`.
+- `proposal_executed` — topics `(solargrid, prop_exec, proposal_id: u64)`, data `(param: Symbol, new_value: i128)`. Emitted by `execute_proposal` once the voting period has ended and quorum is satisfied.
+
+Governance flow:
+1. `propose_parameter_change(proposer, param, new_value)` — any user can propose. Records `voting_ends_at` (voting period) and `expires_at` (proposal expiry).
+2. `vote_on_proposal(voter, proposal_id, in_favor)` — weighted by the voter's stake or meter ownership. Rejected after `voting_ends_at` or `expires_at`.
+3. `execute_proposal(proposal_id)` — callable only after `voting_ends_at`; requires the quorum to be met and the proposal not to have expired. Applies the parameter change and emits `proposal_executed`.
+
+Proposals that reach `expires_at` without execution are no longer executable.
+
 ## Backend Event Listener
 
 The backend can subscribe to these events via the Stellar RPC `getEvents` endpoint:
@@ -126,6 +141,7 @@ All event emissions are covered by unit tests:
 - `test_batch_update_usage_skips_invalid_meter` (includes batch_skip event)
 - `test_emergency_withdraw_announce_then_execute_after_timelock`, `test_emergency_withdraw_requires_frozen`, `test_emergency_withdraw_capped_at_total_revenue`, `test_emergency_withdraw_capped_at_current_balance_if_lower`, `test_cancel_emergency_withdrawal`, `test_emergency_withdraw_reannounce_restarts_timelock` (issue #686)
 - `test_admin_create_and_get_discount`, `test_make_payment_with_discount_applies_percent_off`, `test_make_payment_with_discount_respects_max_uses`, `test_make_payment_with_discount_respects_expiry`, `test_admin_revoke_discount` (issue #687)
+- `test_propose_parameter_change_any_user`, `test_vote_on_proposal_weighted_by_stake`, `test_execute_proposal_after_voting_period`, `test_execute_proposal_requires_quorum`, `test_execute_proposal_rejected_before_voting_ends`, `test_proposal_expires` (issue #845)
 
 **Note:** the crate's test module currently fails to compile on `main` for reasons unrelated to these two features (many pre-existing tests pass a `Symbol` where the `meter_id: String` parameters now expect a `String`, plus a `ContractEvents::iter` API drift) — `cargo test` cannot run for this crate until that's fixed. The new code above was verified with `cargo check` (library) and `cargo build --target wasm32v1-none --release` (both clean), and its own test functions were confirmed to produce zero compiler errors by cross-referencing `cargo check --tests` output against their line ranges.
 
@@ -143,91 +159,6 @@ The `batch_register_meters(meters: Vec<(String, Address)>)` function enables ene
 - **Max Batch Size:** 50 meters per call. Returns `ContractError::BatchTooLarge` if exceeded.
 - **Input Validation:** Pre-validates empty meter IDs, duplicate IDs in batch, existing meters, and owner allowlist membership.
 - **Event Emission:** Emits standard `meter_registered` (`mtr_reg`) event for each successfully registered meter and `batch_skip` (`btch_skip`) for failed/skipped entries.
-- **Detailed Error Reporting:** Returns `Vec<BatchRegisterResult>` with `meter_id`, `success: bool`, and `error: Option<String>` detailing reasons for any partial failures (`empty_meter_id`, `duplicate_in_batch`, `meter_already_exists`, `owner_not_allowlisted`).
-- **Tests:** `test_batch_register_meters_success`, `test_batch_register_meters_partial_failures`, `test_batch_register_meters_too_large`.
+- **Detailed Error Reporting:** Returns `Vec<BatchRegisterResult>` with `meter_id`, `success: bool`, and `error: Option<String>` detailing reasons for any partial failures (`empty_meter_id`, `duplicate_in_batch`, `meter_alre
 
-
-## Contract Upgrades & Storage Migration
-
-The `Meter` struct carries a `version: u32` field (currently `1`). When the struct layout changes in a future release, existing persistent storage entries must be migrated before they can be read by the new code.
-
-### Migration flow
-
-1. Deploy the new contract WASM (old entries remain in persistent storage).
-2. For each registered meter, call the admin-only `migrate_meter(meter_id)` function.  
-   It reads the entry as the previous schema (`LegacyMeter`) and writes it back as the current `Meter` v1.
-3. Once all entries are migrated, the `LegacyMeter` type and `migrate_meter_v0` helper can be removed in a subsequent release.
-
-```bash
-# Migrate a single meter via Stellar CLI
-stellar contract invoke \
-  --id <CONTRACT_ID> \
-  --source <ADMIN_SECRET> \
-  --network testnet \
-  -- migrate_meter --meter_id METER1
-```
-
-> `migrate_meter` is idempotent — calling it on an already-migrated meter overwrites with the same data. Always test on testnet before mainnet.
-
-### Struct version history
-
-| Version | Fields added / changed |
-|---------|------------------------|
-| 1 | Initial layout: `owner`, `active`, `units_used`, `plan`, `last_payment`, `expires_at` |
-
-
-## WASM Build Hash Verification
-
-To prevent supply-chain or configuration drift issues, the CI pipeline computes a SHA-256 hash of the locally built `solar_grid.wasm` artifact and compares it against the hash stored on-chain after every deploy.  A mismatch causes the workflow to exit non-zero, blocking the release.
-
-### How it works
-
-1. **Build** — `cargo build --target wasm32-unknown-unknown --release` produces `contracts/target/wasm32-unknown-unknown/release/solar_grid.wasm`.
-2. **Hash artifact** — `sha256sum` computes the digest, which is written to `wasm-hash.txt` and echoed to the GitHub Actions step summary.
-3. **Deploy** — the WASM is deployed to Stellar Testnet; the new contract ID is captured as a step output.
-4. **Verify on-chain** — `stellar contract info --id <CONTRACT_ID> --network testnet` returns JSON containing a `hash` field (the SHA-256 of the WASM stored on-chain).  The CI step compares it against the local digest (case-insensitively) and exits 1 on any mismatch.
-
-### verify_wasm_hash.sh
-
-A standalone helper script is provided at `contracts/scripts/verify_wasm_hash.sh` for local verification or ad-hoc checks against an already-deployed contract.
-
-```bash
-# Print the local WASM hash only (no on-chain lookup)
-./contracts/scripts/verify_wasm_hash.sh
-
-# Verify against a deployed contract
-CONTRACT_ID=<CONTRACT_ID> ./contracts/scripts/verify_wasm_hash.sh
-
-# Override the WASM path or target network
-WASM_FILE=path/to/custom.wasm CONTRACT_ID=<CONTRACT_ID> NETWORK=mainnet \
-  ./contracts/scripts/verify_wasm_hash.sh
-```
-
-| Variable | Default | Description |
-|---|---|---|
-| `WASM_FILE` | `contracts/target/wasm32-unknown-unknown/release/solar_grid.wasm` | Path to the compiled WASM artifact |
-| `CONTRACT_ID` | _(unset)_ | Deployed contract ID; triggers on-chain comparison when set |
-| `NETWORK` | `testnet` | Stellar network passed to `stellar contract info` |
-
-Exit codes: **0** — hashes match (or `CONTRACT_ID` not set), **1** — mismatch or prerequisite failure.
-
-### CI integration
-
-The verification runs automatically on every `contract-v*` tag push via `.github/workflows/contract-deploy.yml`.  Two steps are involved:
-
-- **Hash WASM artifact** — runs immediately after `Build WASM`; records the digest in the step summary.
-- **Verify on-chain WASM hash** — runs after `Deploy to testnet`; fetches the on-chain hash with `stellar contract info` and fails the job if it does not match the locally computed digest.
-
-## Time-of-use pricing (Issue #857)
-
-`PricingSchedule` contains separate `weekday` and `weekend` vectors of
-`PricingWindow { start_minute, end_minute, rate }` values. Minutes are UTC
-minutes from midnight and ranges are half-open. `set_pricing_schedule` is
-admin-only and rejects non-positive rates, reversed ranges, ranges outside the
-day, and overlapping windows. `get_current_rate` selects the weekday or
-weekend schedule from the ledger timestamp. A gap falls back to the configured
-unit price, preserving the previous pricing behavior.
-
-Usage cost calculation uses the same effective rate, so a caller cannot choose
-a cheaper rate by supplying a client-side timestamp. The schedule is stored in
-instance storage and is replaced atomically after validation.
+/* … truncated 4604 chars — edit only what you need near the top … */
