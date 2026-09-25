@@ -36,6 +36,7 @@ import { insightsRouter } from "./routes/insights.js";
 import { graphqlRouter } from "./routes/graphql.js";
 import { usageRouter } from "./routes/usage.js";
 import { meterMapRouter } from "./routes/meterMap.js";
+import { delegatesRouter } from "./routes/delegates.js";
 import { startIoTBridge, stopIoTBridge } from "./iot/bridge.js";
 import { startLimitWatcher } from "./iot/limitWatcher.js";
 import { logger } from "./lib/logger.js";
@@ -55,6 +56,7 @@ import {
   getUsageEventPoolStatus,
   initUsageEventStore,
   startUsageEventRetryWorker,
+  startUsageCompactionWorker,
 } from "./lib/usageEvents.js";
 import { initMeterNotesStore, getMeterNotesPoolStatus } from "./lib/meterNotes.js";
 import { getUsageHistoryPoolStatus } from "./lib/usageHistory.js";
