@@ -27,6 +27,45 @@ function resetReconnectAttempts(): void {
   reconnectAttempts = 0;
 }
 
+// Issue #846: track the firmware version reported by each meter so the
+// backend can store it per meter and surface it via the firmware endpoints.
+const meterFirmwareVersions = new Map<string, string>();
+
+/**
+ * Extract the firmware version from an incoming MQTT payload. Meters are
+ * expected to include `firmware_version` in their telemetry payloads.
+ */
+export function extractFirmwareVersion(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const version = (payload as Record<string, unknown>).firmware_version;
+  return typeof version === 'string' && version.length > 0 ? version : null;
+}
+
+/**
+ * Record the firmware version reported by a meter. Returns the stored
+ * version, or null when the payload did not include one.
+ */
+export function recordMeterFirmwareVersion(
+  meterId: string,
+  payload: unknown,
+): string | null {
+  const version = extractFirmwareVersion(payload);
+  if (!version) return null;
+  meterFirmwareVersions.set(meterId, version);
+  logger.info('Recorded meter firmware version', { meterId, firmwareVersion: version });
+  return version;
+}
+
+/** Get the stored firmware version for a single meter. */
+export function getMeterFirmwareVersion(meterId: string): string | null {
+  return meterFirmwareVersions.get(meterId) ?? null;
+}
+
+/** List the stored firmware version for every known meter. */
+export function getAllMeterFirmwareVersions(): Record<string, string> {
+  return Object.fromEntries(meterFirmwareVersions);
+}
+
 export function getMqttClient(): MqttClient {
   if (!client) {
     client = mqtt.connect(BROKER, {
