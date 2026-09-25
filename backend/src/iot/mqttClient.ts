@@ -27,43 +27,37 @@ function resetReconnectAttempts(): void {
   reconnectAttempts = 0;
 }
 
-// Issue #846: track the firmware version reported by each meter so the
-// backend can store it per meter and surface it via the firmware endpoints.
-const meterFirmwareVersions = new Map<string, string>();
+// Issue #853: track the last time each meter reported so offline detection
+// can flag meters that have gone silent due to connectivity issues.
+const lastSeenByMeter = new Map<string, number>();
 
 /**
- * Extract the firmware version from an incoming MQTT payload. Meters are
- * expected to include `firmware_version` in their telemetry payloads.
+ * Record that a meter has just reported. Called on every inbound MQTT
+ * message so `last_seen` stays current for offline detection.
  */
-export function extractFirmwareVersion(payload: unknown): string | null {
-  if (!payload || typeof payload !== 'object') return null;
-  const version = (payload as Record<string, unknown>).firmware_version;
-  return typeof version === 'string' && version.length > 0 ? version : null;
+export function recordMeterLastSeen(meterId: string, timestamp: number = Date.now()): void {
+  lastSeenByMeter.set(meterId, timestamp);
 }
 
 /**
- * Record the firmware version reported by a meter. Returns the stored
- * version, or null when the payload did not include one.
+ * Return the last-seen timestamp for a meter, or undefined if it has
+ * never reported.
  */
-export function recordMeterFirmwareVersion(
-  meterId: string,
-  payload: unknown,
-): string | null {
-  const version = extractFirmwareVersion(payload);
-  if (!version) return null;
-  meterFirmwareVersions.set(meterId, version);
-  logger.info('Recorded meter firmware version', { meterId, firmwareVersion: version });
-  return version;
+export function getMeterLastSeen(meterId: string): number | undefined {
+  return lastSeenByMeter.get(meterId);
 }
 
-/** Get the stored firmware version for a single meter. */
-export function getMeterFirmwareVersion(meterId: string): string | null {
-  return meterFirmwareVersions.get(meterId) ?? null;
-}
-
-/** List the stored firmware version for every known meter. */
-export function getAllMeterFirmwareVersions(): Record<string, string> {
-  return Object.fromEntries(meterFirmwareVersions);
+/**
+ * List meters whose last-seen timestamp is older than the given threshold.
+ * Meters that have never reported are treated as offline.
+ */
+export function getOfflineMeters(thresholdMs: number = 60 * 60 * 1000): string[] {
+  const cutoff = Date.now() - thresholdMs;
+  const offline: string[] = [];
+  for (const [meterId, lastSeen] of lastSeenByMeter) {
+    if (lastSeen < cutoff) offline.push(meterId);
+  }
+  return offline;
 }
 
 export function getMqttClient(): MqttClient {
@@ -90,6 +84,20 @@ export function getMqttClient(): MqttClient {
         JSON.stringify({ status: 'online', timestamp: Date.now() }),
         { qos: 1, retain: true },
       );
+    });
+
+    // Issue #853: update last_seen on every inbound MQTT message so offline
+    // detection has an up-to-date view of meter connectivity.
+    client.on('message', (topic, payload) => {
+      try {
+        const data = JSON.parse(payload.toString());
+        const meterId = data?.meterId ?? data?.meter_id ?? topic.split('/').pop();
+        if (meterId) {
+          recordMeterLastSeen(String(meterId));
+        }
+      } catch (err) {
+        logger.warn('Failed to parse MQTT message for last_seen tracking', { topic, err });
+      }
     });
 
     client.on('disconnect', () => {

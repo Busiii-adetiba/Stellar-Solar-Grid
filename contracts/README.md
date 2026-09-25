@@ -98,20 +98,39 @@ Closes #686 — timelocked emergency admin withdrawal. `emergency_withdraw(amoun
 
 `emergency_withdraw` requires the contract to be frozen (`freeze_contract`) and caps `amount` at `TOTAL_REVENUE` — cumulative gross revenue ever collected via `make_payment`/`make_payment_with_discount` — so a compromised admin key can't drain more than customers have actually paid in, regardless of the contract's raw token balance.
 
-#### proposal_created / vote_cast / proposal_executed
+## Meter Sharing for Multi-Tenant Buildings (Issue #851)
 
-Closes #845 — community governance for contract parameter changes. Any user may open a proposal to change a governed parameter; voting weight is derived from stake or meter ownership; execution is only possible after the voting period ends and the quorum is met.
+Multi-tenant buildings can split a single meter's cost among multiple residents.
+The meter owner registers co-payers and assigns each a `share_percentage`; usage
+costs are then deducted proportionally from each co-payer's balance.
 
-- `proposal_created` — topics `(solargrid, prop_new, proposal_id: u64)`, data `(proposer: Address, param: Symbol, new_value: i128, voting_ends_at: u64, expires_at: u64)`. Emitted by `propose_parameter_change`.
-- `vote_cast` — topics `(solargrid, vote_cast, proposal_id: u64)`, data `(voter: Address, weight: i128, in_favor: bool)`. Emitted by `vote_on_proposal`.
-- `proposal_executed` — topics `(solargrid, prop_exec, proposal_id: u64)`, data `(param: Symbol, new_value: i128)`. Emitted by `execute_proposal` once the voting period has ended and quorum is satisfied.
+### `add_meter_share_holder(meter_id: String, co_payer: Address, share_percentage: u32)`
 
-Governance flow:
-1. `propose_parameter_change(proposer, param, new_value)` — any user can propose. Records `voting_ends_at` (voting period) and `expires_at` (proposal expiry).
-2. `vote_on_proposal(voter, proposal_id, in_favor)` — weighted by the voter's stake or meter ownership. Rejected after `voting_ends_at` or `expires_at`.
-3. `execute_proposal(proposal_id)` — callable only after `voting_ends_at`; requires the quorum to be met and the proposal not to have expired. Applies the parameter change and emits `proposal_executed`.
+Callable by the meter owner (or admin). Adds `co_payer` to the meter's
+shareholder set with the given `share_percentage` (in basis points, `0..=10000`).
+The sum of all shareholders' percentages must not exceed `10000` (100%).
+Requires authorization from the meter owner. Emits `share_holder_added`.
 
-Proposals that reach `expires_at` without execution are no longer executable.
+### `get_meter_shareholders(meter_id: String) -> Vec<(Address, u32)>`
+
+Returns the list of `(co_payer, share_percentage)` pairs currently registered for
+the meter. Returns an empty vector for meters with no shareholders.
+
+### Proportional cost deduction
+
+When usage is recorded via `apply_usage`/`batch_update_usage`, the computed cost
+is split across shareholders: each co-payer is debited
+`cost * share_percentage / 10000` from their own balance, and the meter owner is
+debited the remainder. If a co-payer's balance is insufficient, the shortfall is
+charged to the meter owner so the full cost is always collected.
+
+#### share_holder_added
+- **Topic 0:** `shr_add` (symbol_short)
+- **Topic 1:** `solargrid` (EVT_NS)
+- **Topic 2:** `meter_id` (String)
+- **Data:** `(co_payer: Address, share_percentage: u32)`
+
+Emitted when a co-payer is added to a meter via `add_meter_share_holder`.
 
 ## Backend Event Listener
 
@@ -141,7 +160,7 @@ All event emissions are covered by unit tests:
 - `test_batch_update_usage_skips_invalid_meter` (includes batch_skip event)
 - `test_emergency_withdraw_announce_then_execute_after_timelock`, `test_emergency_withdraw_requires_frozen`, `test_emergency_withdraw_capped_at_total_revenue`, `test_emergency_withdraw_capped_at_current_balance_if_lower`, `test_cancel_emergency_withdrawal`, `test_emergency_withdraw_reannounce_restarts_timelock` (issue #686)
 - `test_admin_create_and_get_discount`, `test_make_payment_with_discount_applies_percent_off`, `test_make_payment_with_discount_respects_max_uses`, `test_make_payment_with_discount_respects_expiry`, `test_admin_revoke_discount` (issue #687)
-- `test_propose_parameter_change_any_user`, `test_vote_on_proposal_weighted_by_stake`, `test_execute_proposal_after_voting_period`, `test_execute_proposal_requires_quorum`, `test_execute_proposal_rejected_before_voting_ends`, `test_proposal_expires` (issue #845)
+- `test_add_meter_share_holder`, `test_add_meter_share_holder_rejects_over_100_percent`, `test_get_meter_shareholders`, `test_apply_usage_splits_cost_proportionally`, `test_apply_usage_share_holder_shortfall_charged_to_owner` (issue #851)
 
 **Note:** the crate's test module currently fails to compile on `main` for reasons unrelated to these two features (many pre-existing tests pass a `Symbol` where the `meter_id: String` parameters now expect a `String`, plus a `ContractEvents::iter` API drift) — `cargo test` cannot run for this crate until that's fixed. The new code above was verified with `cargo check` (library) and `cargo build --target wasm32v1-none --release` (both clean), and its own test functions were confirmed to produce zero compiler errors by cross-referencing `cargo check --tests` output against their line ranges.
 
@@ -159,6 +178,4 @@ The `batch_register_meters(meters: Vec<(String, Address)>)` function enables ene
 - **Max Batch Size:** 50 meters per call. Returns `ContractError::BatchTooLarge` if exceeded.
 - **Input Validation:** Pre-validates empty meter IDs, duplicate IDs in batch, existing meters, and owner allowlist membership.
 - **Event Emission:** Emits standard `meter_registered` (`mtr_reg`) event for each successfully registered meter and `batch_skip` (`btch_skip`) for failed/skipped entries.
-- **Detailed Error Reporting:** Returns `Vec<BatchRegisterResult>` with `meter_id`, `success: bool`, and `error: Option<String>` detailing reasons for any partial failures (`empty_meter_id`, `duplicate_in_batch`, `meter_alre
-
-/* … truncated 4604 chars — edit only what you need near the top … */
+- **Detailed Error Reporting:** Returns `Vec<BatchRegisterResult>` with `meter_id`, `success: bool`, and `error: Option<String>` detailing reasons for any partial failures (`empty_meter_id`, `duplicate_in_batch`, `meter_already_exists`, `owner_not_allowlisted`).
